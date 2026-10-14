@@ -37,6 +37,11 @@ public abstract class AbstractRedisStorage<T extends JedisCommands> {
      * Name of trigger hash property which stores the trigger's last fire time
      */
     protected static final String TRIGGER_PREVIOUS_FIRE_TIME = "previousFireTime";
+    /**
+     * Name of the SimpleTrigger hash property which stores how often it has fired.
+     * Cron triggers do not have this property.
+     */
+    protected static final String TRIGGER_TIMES_TRIGGERED = "timesTriggered";
 
     protected final RedisJobStoreSchema redisSchema;
 
@@ -1129,5 +1134,18 @@ public abstract class AbstractRedisStorage<T extends JedisCommands> {
      */
     protected boolean isNullOrEmpty(String string){
         return string == null || string.length() == 0;
+    }
+
+    /**
+     * A DELETE_TRIGGER for a trigger which will not fire again must remove it.
+     * An empty stored next fire time means the fire was recorded and the job did not reschedule the trigger.
+     * A trigger still in ACQUIRED never had that fire recorded: the stored next fire time is the instant which
+     * just passed, not a reschedule, and orphan recovery would put it back to waiting and run it again.
+     */
+    protected boolean deleteBecauseNoFurtherFire(String triggerHashKey, String storedNextFireTime, T jedis) {
+        if (isNullOrEmpty(storedNextFireTime)) {
+            return true;
+        }
+        return jedis.zscore(redisSchema.triggerStateKey(RedisTriggerState.ACQUIRED), triggerHashKey) != null;
     }
 }

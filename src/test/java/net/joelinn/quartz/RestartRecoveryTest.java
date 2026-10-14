@@ -8,11 +8,15 @@ import org.quartz.CronScheduleBuilder;
 import org.quartz.JobBuilder;
 import org.quartz.JobDetail;
 import org.quartz.JobKey;
+import org.quartz.SimpleScheduleBuilder;
 import org.quartz.TriggerBuilder;
 import org.quartz.TriggerKey;
 import org.quartz.impl.triggers.CronTriggerImpl;
+import org.quartz.impl.triggers.SimpleTriggerImpl;
 import org.quartz.spi.OperableTrigger;
 import org.quartz.Trigger;
+
+import java.util.Date;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -379,5 +383,36 @@ public class RestartRecoveryTest extends BaseTest {
         assertTrue("too few cycles: " + cycles, cycles.get() > 20);
         assertEquals("trigger seen in no state set during " + cycles + " fire cycles", 0, seen);
         assertFalse(a.getTriggerState(t.getKey()) == Trigger.TriggerState.NONE);
+    }
+
+    @Test
+    public void aFiredOneShotIsNotRunAgainWhenTheNodeDies() throws Exception {
+        // stateful and not: both must record the fire, so a dead node's orphan pass cannot acquire it again
+        for (Class<? extends org.quartz.Job> jobClass : new Class[]{ TestJob.class, TestJobNonConcurrent.class }) {
+            String name = jobClass == TestJob.class ? "once-open" : "once-stateful";
+            RedisJobStore a = node("A-" + name, 500, 200, 0);
+            RedisJobStore b = node("B-" + name, 500, 200, 100);
+            b.schedulerStarted();
+
+            JobDetail job = JobBuilder.newJob(jobClass).withIdentity("job-" + name, "g").build();
+            SimpleTriggerImpl trigger = (SimpleTriggerImpl) TriggerBuilder.newTrigger().withIdentity("trigger-" + name, "g").forJob(job.getKey())
+                    .withSchedule(SimpleScheduleBuilder.simpleSchedule().withRepeatCount(0))
+                    .startAt(new Date(System.currentTimeMillis() + 30_000)).build();
+            trigger.computeFirstFireTime(null);
+            a.storeJobAndTrigger(job, trigger);
+
+            List<OperableTrigger> acquired = acquire(a);
+            assertEquals(1, acquired.size());
+            a.triggersFired(acquired);
+            Thread.sleep(800); // A has not checked in, so B treats it as dead
+
+            assertEquals(name + " was acquired again", -1, millisUntilTaken(b, trigger, 1500));
+            assertEquals("NONE", stateSet(trigger));
+            assertEquals("", jedis.hget(schema.triggerHashKey(trigger.getKey()), "nextFireTime"));
+            assertEquals("1", jedis.hget(schema.triggerHashKey(trigger.getKey()), "timesTriggered"));
+
+            a.triggeredJobComplete(acquired.get(0), job, Trigger.CompletedExecutionInstruction.DELETE_TRIGGER);
+            assertNull(a.retrieveTrigger(trigger.getKey()));
+        }
     }
 }

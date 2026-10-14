@@ -119,6 +119,21 @@ public class FireCompleteContractTest extends BaseTest {
         assertEquals("NONE", stateOf(t));
         assertEquals("", hashField(t, "nextFireTime"));
         assertNotNull(hashField(t, "previousFireTime"));
+        assertEquals("1", hashField(t, "timesTriggered"));
+    }
+
+    @Test
+    public void completeDeletesConcurrentOneShot() throws Exception {
+        JobDetail job = job("c1d", TestJob.class);
+        OperableTrigger t = oneShot("t", job);
+        storeJobAndTriggers(job, t);
+        List<OperableTrigger> acquired = jobStore.acquireNextTriggers(System.currentTimeMillis() + 120_000, 10, 0);
+        jobStore.triggersFired(acquired);
+
+        jobStore.triggeredJobComplete(acquired.get(0), job, Trigger.CompletedExecutionInstruction.DELETE_TRIGGER);
+
+        assertNull(jobStore.retrieveTrigger(t.getKey()));
+        assertEquals("NONE", stateOf(t));
     }
 
     @Test
@@ -197,7 +212,65 @@ public class FireCompleteContractTest extends BaseTest {
         assertTrue(jobBlocked(job));
         assertEquals(SCHEDULER, jedis.get(schema.jobBlockedKey(job.getKey())));
         assertNotNull("previous fire time is set", hashField(t, "previousFireTime"));
-        assertEquals("ACQUIRED", stateOf(t));
+        assertEquals("the fire is recorded", "", hashField(t, "nextFireTime"));
+        assertEquals("1", hashField(t, "timesTriggered"));
+        assertEquals("NONE", stateOf(t));
+        assertNull("not left acquired for orphan recovery", lockOf(t));
+    }
+
+    @Test
+    public void completeDeletesStatefulOneShot() throws Exception {
+        JobDetail job = job("s3d", TestJobNonConcurrent.class);
+        OperableTrigger t = oneShot("t", job);
+        storeJobAndTriggers(job, t);
+        List<OperableTrigger> acquired = jobStore.acquireNextTriggers(System.currentTimeMillis() + 120_000, 10, 0);
+        jobStore.triggersFired(acquired);
+
+        // DELETE_TRIGGER is what Quartz sends when the run finishes and the trigger will not fire again,
+        // whether the job returned or threw
+        jobStore.triggeredJobComplete(acquired.get(0), job, Trigger.CompletedExecutionInstruction.DELETE_TRIGGER);
+
+        assertNull(jobStore.retrieveTrigger(t.getKey()));
+        assertEquals("NONE", stateOf(t));
+        assertTrue("job still blocked", !jobBlocked(job));
+    }
+
+    @Test
+    public void completeDeletesStatefulOneShotWhoseFireWasNeverRecorded() throws Exception {
+        // the state left by 2.0.0.0-RC: the trigger is still acquired, nextFireTime and timesTriggered are unchanged
+        JobDetail job = job("s3s", TestJobNonConcurrent.class);
+        OperableTrigger stored = oneShot("t", job);
+        storeJobAndTriggers(job, stored);
+        List<OperableTrigger> acquired = jobStore.acquireNextTriggers(System.currentTimeMillis() + 120_000, 10, 0);
+        OperableTrigger inMemory = acquired.get(0);
+        inMemory.triggered(null);
+        assertEquals("ACQUIRED", stateOf(stored));
+        assertTrue(hashField(stored, "nextFireTime").length() > 0);
+        assertEquals("0", hashField(stored, "timesTriggered"));
+
+        jobStore.triggeredJobComplete(inMemory, job, Trigger.CompletedExecutionInstruction.DELETE_TRIGGER);
+
+        assertNull(jobStore.retrieveTrigger(stored.getKey()));
+        assertEquals("NONE", stateOf(stored));
+    }
+
+    @Test
+    public void completeKeepsAStatefulTriggerRescheduledWhileItRan() throws Exception {
+        JobDetail job = job("s3r", TestJobNonConcurrent.class);
+        OperableTrigger t = cron("t", job);
+        storeJobAndTriggers(job, t);
+        List<OperableTrigger> acquired = acquireAll();
+        jobStore.triggersFired(acquired);
+        long rescheduled = System.currentTimeMillis() + 3_600_000L;
+        jedis.hset(schema.triggerHashKey(t.getKey()), "nextFireTime", Long.toString(rescheduled));
+        acquired.get(0).setNextFireTime(null);
+
+        jobStore.triggeredJobComplete(acquired.get(0), job, Trigger.CompletedExecutionInstruction.DELETE_TRIGGER);
+
+        assertNotNull(jobStore.retrieveTrigger(t.getKey()));
+        assertEquals(Long.toString(rescheduled), hashField(t, "nextFireTime"));
+        // completion unblocks the job, so the rescheduled trigger is waiting rather than blocked
+        assertEquals("WAITING", stateOf(t));
     }
 
     @Test
