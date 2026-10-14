@@ -869,9 +869,13 @@ public class RedisStorage extends AbstractRedisStorage<Jedis> {
 
             final Date nextFireDate = trigger.getNextFireTime();
             final long nextFireTime = nextFireDate != null ? nextFireDate.getTime() : 0;
-            final Map<String, String> fireTimes = new HashMap<>(2);
+            final Map<String, String> fireTimes = new HashMap<>(4);
+            // no next fire is stored as an empty string, the same way a one-shot is stored after it has fired
             fireTimes.put(TRIGGER_NEXT_FIRE_TIME, nextFireDate != null ? Long.toString(nextFireTime) : "");
             fireTimes.put(TRIGGER_PREVIOUS_FIRE_TIME, Long.toString(System.currentTimeMillis()));
+            if (trigger instanceof SimpleTrigger) {
+                fireTimes.put(TRIGGER_TIMES_TRIGGERED, Integer.toString(((SimpleTrigger) trigger).getTimesTriggered()));
+            }
 
             final Map<String, String> jobMap = jobResponse.get();
             final JobDetail job = jobMap == null || jobMap.isEmpty() ? null : buildJob(jobKey, jobMap, jobDataResponse.get());
@@ -909,12 +913,14 @@ public class RedisStorage extends AbstractRedisStorage<Jedis> {
                 pipe.sync();
 
                 // and all changes in one request. The fired trigger goes from ACQUIRED straight to BLOCKED (before: via WAITING,
-                // where another scheduler could acquire it before it was blocked)
+                // where another scheduler could acquire it before it was blocked). A trigger with no further fire is
+                // taken out of ACQUIRED entirely: leaving it there, with the old next fire time, is what made orphan
+                // recovery run a stateful one-shot again.
                 pipe = jedis.pipelined();
                 if (nextFireDate != null) {
                     queueTriggerState(pipe, RedisTriggerState.BLOCKED, nextFireTime, triggerHashKey, true, fireTimes);
                 } else {
-                    pipe.hset(triggerHashKey, TRIGGER_PREVIOUS_FIRE_TIME, fireTimes.get(TRIGGER_PREVIOUS_FIRE_TIME));
+                    queueTriggerState(pipe, null, 0, triggerHashKey, false, fireTimes);
                 }
                 for (Map.Entry<String, Response<Double>> sibling : waiting.entrySet()) {
                     final Double waitingScore = sibling.getValue().get();
@@ -1020,8 +1026,9 @@ public class RedisStorage extends AbstractRedisStorage<Jedis> {
             // trigger was not deleted during job execution
             if(triggerInstCode == Trigger.CompletedExecutionInstruction.DELETE_TRIGGER){
                 if(trigger.getNextFireTime() == null){
-                    // double-check for possible reschedule within job execution, which would cancel the need to delete
-                    if(isNullOrEmpty(jedis.hget(triggerHashKey, TRIGGER_NEXT_FIRE_TIME))){
+                    // double-check for possible reschedule within job execution, which would cancel the need to delete.
+                    // A trigger still acquired has not had its fire recorded, so the stored next fire time is stale.
+                    if(deleteBecauseNoFurtherFire(triggerHashKey, jedis.hget(triggerHashKey, TRIGGER_NEXT_FIRE_TIME), jedis)){
                         removeTrigger(trigger.getKey(), jedis);
                     }
                 }

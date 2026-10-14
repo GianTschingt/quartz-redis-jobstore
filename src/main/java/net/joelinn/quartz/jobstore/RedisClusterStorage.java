@@ -696,6 +696,9 @@ public class RedisClusterStorage extends AbstractRedisStorage<JedisClusterComman
                 unsetTriggerState(triggerHashKey, jedis);
             }
             jedis.hset(triggerHashKey, TRIGGER_PREVIOUS_FIRE_TIME, Long.toString(System.currentTimeMillis()));
+            if (trigger instanceof SimpleTrigger) {
+                jedis.hset(triggerHashKey, TRIGGER_TIMES_TRIGGERED, Integer.toString(((SimpleTrigger) trigger).getTimesTriggered()));
+            }
 
             results.add(new TriggerFiredResult(triggerFiredBundle));
         }
@@ -759,8 +762,9 @@ public class RedisClusterStorage extends AbstractRedisStorage<JedisClusterComman
             // trigger was not deleted during job execution
             if (triggerInstCode == Trigger.CompletedExecutionInstruction.DELETE_TRIGGER) {
                 if (trigger.getNextFireTime() == null) {
-                    // double-check for possible reschedule within job execution, which would cancel the need to delete
-                    if (isNullOrEmpty(jedis.hget(triggerHashKey, TRIGGER_NEXT_FIRE_TIME))) {
+                    // double-check for possible reschedule within job execution, which would cancel the need to delete.
+                    // A trigger still acquired has not had its fire recorded, so the stored next fire time is stale.
+                    if (deleteBecauseNoFurtherFire(triggerHashKey, jedis.hget(triggerHashKey, TRIGGER_NEXT_FIRE_TIME), jedis)) {
                         removeTrigger(trigger.getKey(), jedis);
                     }
                 } else {

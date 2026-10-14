@@ -1,4 +1,7 @@
 # Changelog
+### 2.0.0.1-RC (Lucee fork)
+* A one-shot trigger is recorded when it fires (previous fire time, times triggered, next fire time cleared) and deleted when its run finishes, also when the job threw, so orphan recovery cannot run it a second time (LDEV-6576).
+
 ### 2.0.0.0-RC (Lucee fork, restart recovery)
 Recovery of the triggers of a scheduler which stopped or died, and atomic state changes.
 * **Heartbeat**: every scheduler registers as alive from a separate thread (`heartbeatInterval`, default 5 s, 0 turns it off), no longer only when it looks for work. The scheduling loop can be blocked for a long time (all worker threads busy) without the scheduler being taken for dead, so `clusterCheckinInterval` can be much shorter than the default 4 minutes (recommended: at least three times the heartbeat interval, for example 30000).

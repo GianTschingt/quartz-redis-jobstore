@@ -91,6 +91,10 @@ A job is taken over after at most `clusterCheckinInterval + releaseTriggersInter
 take over at once. Do not set `clusterCheckinInterval` shorter than the longest pause a scheduler can have without
 sending the heartbeat (a long garbage collection): its triggers would be taken over while it is still alive.
 
+A one-shot is recorded when it fires (previous fire time, and for a simple trigger how often it has fired) and its next
+fire time is cleared, whether or not the job may run concurrently. When the run finishes the trigger is deleted, including
+when the job threw. Orphan recovery then has nothing acquired to put back to waiting, so the one-shot cannot run again.
+
 ## Limitations
 All GroupMatcher comparators have been implemented. 
 Aside from that, the same limitations outlined in [redis-quartz's readme](https://github.com/RedisLabs/redis-quartz#limitations) apply.
